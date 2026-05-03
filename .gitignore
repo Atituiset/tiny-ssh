@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# local data
+*.sqlite
+*.sqlite-journal
+data/

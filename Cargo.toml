@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/tiny-ssh-core", "crates/tiny-ssh-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/tiny-ssh"
+
+[workspace.dependencies]
+tiny-ssh-core = { path = "crates/tiny-ssh-core" }
+
+# async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# ssh
+russh = "0.45"
+russh-keys = "0.45"
+
+# storage / data
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# tui
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# infra
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

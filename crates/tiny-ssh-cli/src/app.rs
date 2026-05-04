@@ -35,6 +35,8 @@ pub enum Action {
     Send(Vec<u8>),
     /// Disconnect cleanly and exit.
     Quit,
+    /// Toggle local mouse capture (Ctrl+Shift+M).
+    ToggleMouseCapture,
     /// No-op (UI-only state change, or a key we don't translate).
     None,
 }
@@ -69,6 +71,15 @@ pub struct App {
     last_action_was_suggestion: bool,
     /// True after Enter is pressed until we see the next prompt heuristic.
     pub last_input_was_enter: bool,
+
+    /// Whether crossterm mouse capture is enabled.
+    /// When enabled, mouse events are forwarded to the remote PTY.
+    /// When disabled, the terminal emulator handles mouse natively
+    /// (text selection, right-click paste, etc.).
+    pub mouse_capture: bool,
+    /// Set to `true` when `mouse_capture` changes so the driver can sync
+    /// the crossterm state (EnableMouseCapture / DisableMouseCapture).
+    pub mouse_capture_changed: bool,
 }
 
 impl App {
@@ -87,6 +98,8 @@ impl App {
             cwd: None,
             last_action_was_suggestion: false,
             last_input_was_enter: false,
+            mouse_capture: true,
+            mouse_capture_changed: false,
         }
     }
 
@@ -212,9 +225,16 @@ impl App {
     /// Apply a key event. Encodes the key, updates the shadow buffer, and
     /// asks the driver to forward the encoded bytes to the remote.
     pub fn on_key(&mut self, key: KeyEvent, history: &History) -> Action {
-        // Local capture: only Ctrl-Q for quit. Everything else passes through.
+        // Local capture: Ctrl-Q for quit, Ctrl+Shift+M toggles mouse capture.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Action::Quit;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('m' | 'M'))
+        {
+            self.mouse_capture = !self.mouse_capture;
+            self.mouse_capture_changed = true;
+            return Action::ToggleMouseCapture;
         }
 
         // Right at end-of-shadow with an active suggestion: accept the ghost.

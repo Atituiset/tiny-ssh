@@ -4,6 +4,7 @@
 //! The visible cursor is placed at the VT cursor position; the autosuggest
 //! ghost-text is overlaid as dim text starting at that cursor.
 
+use alacritty_terminal::term::cell::Flags;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -54,7 +55,13 @@ fn render_grid(f: &mut Frame<'_>, area: Rect, app: &App) {
             }
             current_line = line_idx;
         }
-        current_text.push(indexed.cell.c);
+        if !indexed
+            .cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            current_text.push(indexed.cell.c);
+        }
     }
     if current_line != i32::MIN {
         lines.push(Line::from(current_text));
@@ -104,13 +111,14 @@ fn render_status(f: &mut Frame<'_>, area: Rect, app: &App) {
         .as_ref()
         .map(|p| format!(" cwd:{}", p.display()))
         .unwrap_or_default();
+    let mouse_label = if app.mouse_capture { "mouse" } else { "MOUSE-OFF" };
     let mut spans = vec![
         Span::styled(
             format!("[{state_label}]"),
             Style::default().fg(Color::Cyan),
         ),
         Span::raw(cwd_label),
-        Span::raw(" · → accept · Tab/Ctrl-* remote · Ctrl-Q quit"),
+        Span::raw(format!(" · {mouse_label} · → accept · Tab/Ctrl-* remote · Ctrl-Q quit")),
     ];
     if let Some(err) = &app.last_error {
         spans.push(Span::raw(" · "));

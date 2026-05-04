@@ -204,6 +204,16 @@ async fn drive(
     let mut redraw = true;
 
     loop {
+        if app.mouse_capture_changed {
+            if app.mouse_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            app.mouse_capture_changed = false;
+            redraw = true;
+        }
+
         if redraw {
             terminal.draw(|f| ui::render(f, &app))?;
             redraw = false;
@@ -272,17 +282,36 @@ async fn handle_terminal_event(
                     let _ = handle.disconnect().await;
                     Ok(true)
                 }
+                Action::ToggleMouseCapture => Ok(false),
                 Action::None => Ok(false),
             }
         }
         Event::Mouse(mouse) => {
-            let bytes = keys::encode_mouse(&mouse, app.terminal.mode());
-            if !bytes.is_empty() {
-                if let Err(e) = handle.send_bytes(bytes).await {
-                    app.last_error = Some(e.to_string());
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                // Local scroll: wheel events in normal screen mode scroll the VT
+                // history; in alt-screen they are forwarded to the remote app.
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    if !app.terminal.is_alt_screen() =>
+                {
+                    let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                        -3
+                    } else {
+                        3
+                    };
+                    app.terminal.scroll_display(delta);
+                    Ok(false)
+                }
+                _ => {
+                    let bytes = keys::encode_mouse(&mouse, app.terminal.mode());
+                    if !bytes.is_empty() {
+                        if let Err(e) = handle.send_bytes(bytes).await {
+                            app.last_error = Some(e.to_string());
+                        }
+                    }
+                    Ok(false)
                 }
             }
-            Ok(false)
         }
         Event::Paste(text) => {
             let bytes = if app.terminal.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE) {

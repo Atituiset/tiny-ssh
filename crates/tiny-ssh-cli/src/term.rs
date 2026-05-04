@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::{Config, RenderableContent, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 
@@ -83,6 +84,11 @@ impl Terminal {
     /// Borrow renderable content for the current frame.
     pub fn renderable_content(&self) -> RenderableContent<'_> {
         self.inner.renderable_content()
+    }
+
+    /// Scroll the display viewport by `lines` (positive = down, negative = up).
+    pub fn scroll_display(&mut self, lines: i32) {
+        self.inner.scroll_display(Scroll::Delta(lines));
     }
 
     #[cfg(test)]

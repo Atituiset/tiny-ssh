@@ -173,13 +173,15 @@ impl History {
         Ok(())
     }
 
-    /// Best autosuggestion for the given context. Fish-style: most recent,
-    /// frequency-weighted, prefer same cwd, fall back to host-only.
+    /// Best autosuggestion for the given context. Fish-style: pick the most
+    /// recent command on this host whose prefix matches, preferring the
+    /// current cwd if one is supplied.
     pub fn suggest(&self, ctx: &SuggestContext<'_>) -> Result<Option<Suggestion>, HistoryError> {
         if ctx.prefix.is_empty() {
             return Ok(None);
         }
         let prefix_pat = like_escape(ctx.prefix);
+        let like_arg = format!("{prefix_pat}%");
 
         // Pass 1: same host + cwd
         if let Some(cwd) = ctx.cwd {
@@ -187,30 +189,28 @@ impl History {
                 .conn
                 .query_row(
                     r#"
-                    SELECT id, command, COUNT(*) AS freq, MAX(timestamp) AS recency
+                    SELECT id, command
                     FROM history
                     WHERE host = ?
                       AND cwd  = ?
                       AND command LIKE ? ESCAPE '\'
                       AND command != ?
-                    GROUP BY command
-                    ORDER BY recency DESC
+                    ORDER BY timestamp DESC
                     LIMIT 1
                     "#,
-                    params![ctx.host, cwd, format!("{prefix_pat}%"), ctx.prefix],
+                    params![ctx.host, cwd, like_arg, ctx.prefix],
                     |row| {
                         let id: i64 = row.get(0)?;
                         let cmd: String = row.get(1)?;
-                        let freq: i64 = row.get(2)?;
-                        Ok((HistoryId(id), cmd, freq))
+                        Ok((HistoryId(id), cmd))
                     },
                 )
                 .optional()?;
-            if let Some((id, cmd, freq)) = row {
+            if let Some((id, cmd)) = row {
                 return Ok(Some(Suggestion {
                     command: cmd,
                     source_id: id,
-                    score: score(freq, true),
+                    score: score(true),
                 }));
             }
         }
@@ -220,28 +220,26 @@ impl History {
             .conn
             .query_row(
                 r#"
-                SELECT id, command, COUNT(*) AS freq, MAX(timestamp) AS recency
+                SELECT id, command
                 FROM history
                 WHERE host = ?
                   AND command LIKE ? ESCAPE '\'
                   AND command != ?
-                GROUP BY command
-                ORDER BY recency DESC
+                ORDER BY timestamp DESC
                 LIMIT 1
                 "#,
-                params![ctx.host, format!("{prefix_pat}%"), ctx.prefix],
+                params![ctx.host, like_arg, ctx.prefix],
                 |row| {
                     let id: i64 = row.get(0)?;
                     let cmd: String = row.get(1)?;
-                    let freq: i64 = row.get(2)?;
-                    Ok((HistoryId(id), cmd, freq))
+                    Ok((HistoryId(id), cmd))
                 },
             )
             .optional()?;
-        Ok(row.map(|(id, cmd, freq)| Suggestion {
+        Ok(row.map(|(id, cmd)| Suggestion {
             command: cmd,
             source_id: id,
-            score: score(freq, false),
+            score: score(false),
         }))
     }
 
@@ -276,13 +274,15 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
     })
 }
 
-fn score(freq: i64, same_cwd: bool) -> f64 {
-    // saturating logistic: 1 use → 0.5, 5 uses → ~0.83, 10 uses → ~0.91
-    let base = (freq as f64) / ((freq as f64) + 1.0);
+fn score(same_cwd: bool) -> f64 {
+    // Two-tier confidence. Same-cwd hits land at 0.9 so they outrank both
+    // cross-cwd history hits (0.4) and any future Layer-3 KB suggestions
+    // we set to live in [0.5, 0.7]. Knobs are intentionally coarse — we
+    // recompute properly in the engine when comparing across layers.
     if same_cwd {
-        (base * 0.5 + 0.5).min(1.0) // boost: floor 0.5, cap 1.0
+        0.9
     } else {
-        base.max(0.3) // floor 0.3 so we always have *some* suggestion
+        0.4
     }
 }
 
@@ -421,5 +421,53 @@ mod tests {
             })
             .unwrap();
         assert!(s.is_none(), "exact prefix shouldn't suggest itself");
+    }
+
+    #[test]
+    fn score_same_cwd_strictly_beats_cross_cwd() {
+        let same = score(true);
+        let cross = score(false);
+        assert!(
+            same >= 0.5 && cross < 0.5,
+            "expected same={same:.3} ≥ 0.5 > cross={cross:.3}"
+        );
+        assert!(same > cross, "same={same:.3} must beat cross={cross:.3}");
+    }
+
+    #[test]
+    fn suggest_source_id_points_at_most_recent_matching_row() {
+        let h = History::open_in_memory().unwrap();
+        let _id_old = h.record(entry("h1", None, "git status", 100)).unwrap();
+        let id_recent = h.record(entry("h1", None, "git status", 300)).unwrap();
+
+        let s = h
+            .suggest(&SuggestContext {
+                host: "h1",
+                cwd: None,
+                prefix: "git ",
+            })
+            .unwrap()
+            .expect("suggestion");
+        assert_eq!(s.source_id, id_recent);
+    }
+
+    #[test]
+    fn suggest_falls_back_to_other_cwd_when_current_has_no_match() {
+        let h = History::open_in_memory().unwrap();
+        h.record(entry("h1", Some("/a"), "make build", 100)).unwrap();
+        h.record(entry("h1", Some("/b"), "make test", 200)).unwrap();
+
+        // We're in /c — no same-cwd match, but Pass 2 should pick the most
+        // recent host-wide hit.
+        let s = h
+            .suggest(&SuggestContext {
+                host: "h1",
+                cwd: Some("/c"),
+                prefix: "make ",
+            })
+            .unwrap()
+            .expect("suggestion");
+        assert_eq!(s.command, "make test");
+        assert!(s.score < 0.5, "expected cross-cwd score, got {}", s.score);
     }
 }

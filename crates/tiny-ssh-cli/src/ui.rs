@@ -1,14 +1,17 @@
 //! ratatui rendering for the App.
+//!
+//! Layout: a full-screen VT grid on top, a single status line on the bottom.
+//! The visible cursor is placed at the VT cursor position; the autosuggest
+//! ghost-text is overlaid as dim text starting at that cursor.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::Paragraph,
     Frame,
 };
 use tiny_ssh_core::SessionState;
-use unicode_width_compat::UnicodeWidthCompat;
 
 use crate::app::App;
 
@@ -17,57 +20,75 @@ pub fn render(f: &mut Frame<'_>, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // output
-            Constraint::Length(3), // input box
+            Constraint::Min(1),    // VT grid
             Constraint::Length(1), // status bar
         ])
         .split(area);
 
-    render_output(f, chunks[0], app);
-    render_input(f, chunks[1], app);
-    render_status(f, chunks[2], app);
+    let grid_area = chunks[0];
+    render_grid(f, grid_area, app);
+    render_status(f, chunks[1], app);
+
+    let (cur_col, cur_row) = app.terminal.cursor();
+    let cx = grid_area.x.saturating_add(cur_col);
+    let cy = grid_area.y.saturating_add(cur_row);
+    if cx < grid_area.right() && cy < grid_area.bottom() {
+        f.set_cursor_position((cx, cy));
+    }
 }
 
-fn render_output(f: &mut Frame<'_>, area: Rect, app: &App) {
-    let title = format!(" {}@{} — output ", app.user, app.host);
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
-
-    let visible_rows = inner.height as usize;
-    let start = app.output.len().saturating_sub(visible_rows);
-    let lines: Vec<Line<'_>> = app
-        .output
-        .iter()
-        .skip(start)
-        .map(|s| Line::from(s.clone()))
-        .collect();
-
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
-        area,
-    );
-}
-
-fn render_input(f: &mut Frame<'_>, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" input ");
-    let inner = block.inner(area);
-
-    let mut spans: Vec<Span<'_>> = Vec::new();
-    spans.push(Span::raw(app.input.clone()));
-    if let Some(suggestion) = &app.suggestion {
-        spans.push(Span::styled(
-            suggestion.clone(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ));
+/// Render the VT grid plus optional ghost-text overlay.
+///
+/// P3 keeps styling minimal — just glyphs. Colour and attributes wait until
+/// later phases.
+fn render_grid(f: &mut Frame<'_>, area: Rect, app: &App) {
+    let content = app.terminal.renderable_content();
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut current_line: i32 = i32::MIN;
+    let mut current_text: String = String::new();
+    for indexed in content.display_iter {
+        let line_idx = indexed.point.line.0;
+        if line_idx != current_line {
+            if current_line != i32::MIN {
+                lines.push(Line::from(std::mem::take(&mut current_text)));
+            }
+            current_line = line_idx;
+        }
+        current_text.push(indexed.cell.c);
+    }
+    if current_line != i32::MIN {
+        lines.push(Line::from(current_text));
     }
 
-    f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+    f.render_widget(Paragraph::new(lines), area);
 
-    // Place the cursor at the user's logical position.
-    let cursor_col = inner.x + display_width(&app.input, app.cursor);
-    f.set_cursor_position((cursor_col.min(area.right().saturating_sub(1)), inner.y));
+    if app.can_show_suggestion() {
+        if let Some(suggestion) = &app.suggestion {
+            let (cur_col, cur_row) = app.terminal.cursor();
+            let x = area.x.saturating_add(cur_col);
+            let y = area.y.saturating_add(cur_row);
+            if x < area.right() && y < area.bottom() {
+                let max_w = area.right().saturating_sub(x) as usize;
+                let truncated: String = suggestion.chars().take(max_w).collect();
+                let width = truncated.chars().count().min(max_w) as u16;
+                if width > 0 {
+                    let ghost_area = Rect {
+                        x,
+                        y,
+                        width,
+                        height: 1,
+                    };
+                    let style = Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM);
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(truncated, style))),
+                        ghost_area,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn render_status(f: &mut Frame<'_>, area: Rect, app: &App) {
@@ -78,13 +99,18 @@ fn render_status(f: &mut Frame<'_>, area: Rect, app: &App) {
         SessionState::Closed => "closed".to_string(),
         SessionState::Failed(msg) => format!("failed: {msg}"),
     };
+    let cwd_label = app
+        .cwd
+        .as_ref()
+        .map(|p| format!(" cwd:{}", p.display()))
+        .unwrap_or_default();
     let mut spans = vec![
         Span::styled(
             format!("[{state_label}]"),
             Style::default().fg(Color::Cyan),
         ),
-        Span::raw(" "),
-        Span::raw("Tab: accept · Ctrl-D: EOF · Ctrl-Q: quit · Ctrl-L: clear"),
+        Span::raw(cwd_label),
+        Span::raw(" · → accept · Tab/Ctrl-* remote · Ctrl-Q quit"),
     ];
     if let Some(err) = &app.last_error {
         spans.push(Span::raw(" · "));
@@ -94,26 +120,4 @@ fn render_status(f: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-/// Width of the first `chars` characters of `s` in terminal cells.
-fn display_width(s: &str, chars: usize) -> u16 {
-    let prefix: String = s.chars().take(chars).collect();
-    prefix.terminal_width() as u16
-}
-
-// Tiny shim to avoid pulling unicode-width into the workspace deps for one
-// helper. ratatui already brings unicode-width transitively, but the public
-// re-export name varies between versions; bind it here.
-mod unicode_width_compat {
-    pub trait UnicodeWidthCompat {
-        fn terminal_width(&self) -> usize;
-    }
-    impl UnicodeWidthCompat for str {
-        fn terminal_width(&self) -> usize {
-            // Fallback: count chars (works for ASCII; CJK will under-count).
-            // Acceptable for v0.1 — cursor placement is best-effort.
-            self.chars().count()
-        }
-    }
 }

@@ -54,7 +54,7 @@ impl SshSession {
             trace!(target: "tiny_ssh::transport::ssh", ?msg, "channel msg");
             match msg {
                 ChannelMsg::Data { data } => return Some(SshEvent::Data(data.to_vec())),
-                ChannelMsg::ExtendedData { data, ext } if ext == 1 => {
+                ChannelMsg::ExtendedData { data, ext: 1 } => {
                     return Some(SshEvent::Stderr(data.to_vec()));
                 }
                 ChannelMsg::Eof => return Some(SshEvent::Eof),

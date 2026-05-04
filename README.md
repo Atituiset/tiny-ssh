@@ -5,21 +5,23 @@
 
 ## 项目状态
 
-**v0.1 (MVP)**：CLI/TUI、SSH 终端、本地历史补全。
+**v0.2**：完整 VT 终端仿真、内联 ghost-text autosuggest、鼠标/粘贴支持。
 
 | 功能 | 状态 |
 |------|------|
 | SSH 密码 / 私钥认证 | ✅ |
-| PTY shell + 远端输出（line-mode，ANSI 剥离） | ✅ |
-| Fish 风格灰色补全（按 host 聚合） | ✅ |
-| Tab / → 接受补全 | ✅ |
+| PTY shell + 完整 VT 仿真（`alacritty_terminal`） | ✅ |
+| Fish 风格灰色补全（按 host + cwd 排序） | ✅ |
+| `→` 接受 ghost-text / Tab 透传 | ✅ |
 | 命令历史持久化（SQLite） | ✅ |
-| Ctrl-C / Ctrl-D / Ctrl-L / Ctrl-Q / Ctrl-U | ✅ |
+| Ctrl-Q 本地退出；其余 Ctrl-* 透传远端 | ✅ |
+| 鼠标捕获 + SGR 协议 | ✅ |
+| Bracketed Paste | ✅ |
+| OSC 7 cwd 跟踪 + OSC 133 prompt 标记 | ✅ |
 | 终端窗口大小同步 | ✅ |
-| 端到端集成测试（in-process echo server） | ✅ |
+| 端到端集成测试（echo server + VT 集成） | ✅ |
 | 数据库客户端（MySQL / PostgreSQL） | ⏳ 留接口未实现 |
 | 静态知识库 / LLM 建议 | ⏳ 留接口未实现 |
-| 完整 VT 终端模拟 | ⏳ v0.2（计划接 `alacritty_terminal`） |
 | 桌面 GUI（Tauri） / 移动端 | ⏳ |
 
 ## 仓库结构
@@ -35,8 +37,8 @@ tiny-ssh/
 │   │   ├── src/history.rs       Layer 3: SQLite 历史 + Fish 补全
 │   │   ├── src/suggest.rs                建议引擎入口（多层留扩展点）
 │   │   └── tests/echo_server.rs e2e: 启动 in-process russh 服务器对打
-│   └── tiny-ssh-cli/         # MVP TUI 二进制（ratatui + crossterm）
-│       └── src/{main,app,ui,ansi}.rs
+│   └── tiny-ssh-cli/         # TUI 二进制 + 库（ratatui + crossterm + alacritty_terminal）
+│       └── src/{lib,main,app,ui,term,keys}.rs
 └── Cargo.toml
 ```
 
@@ -81,13 +83,15 @@ tssh "$(whoami)@127.0.0.1:8022"
 
 | 键 | 行为 |
 |----|------|
-| `Tab` / `→`（行尾时） | 接受灰色补全 |
+| `→`（光标在行尾且有补全时） | 接受灰色 ghost-text |
+| `Tab` | 透传给远端 shell（用于远端 Tab 补全） |
 | `Enter` | 提交当前行到远端，并写入历史 |
-| `Ctrl-C` | 给远端发 SIGINT |
-| `Ctrl-D` | 空行时关闭远端 shell；非空时清空输入 |
-| `Ctrl-L` | 仅清空本地滚动区（不影响远端） |
-| `Ctrl-U` | 清空当前输入 |
-| `Ctrl-Q` | 断开并退出 |
+| `Ctrl-C` | 给远端发 SIGINT（透传） |
+| `Ctrl-D` | 空行时关闭远端 shell；非空时清空输入（透传） |
+| `Ctrl-L` | 透传给远端（清屏） |
+| `Ctrl-U` | 透传给远端（清空当前行） |
+| `Ctrl-Q` | **本地**断开并退出 |
+| 鼠标点击 / 滚轮 | 透传给远端（SGR 协议，需远端启用 mouse mode） |
 
 补全只看你在**这个 host 上**用过的命令。新连一台机器时还没有数据，多用几次就开始有效。
 
@@ -97,11 +101,14 @@ tssh "$(whoami)@127.0.0.1:8022"
 # 全部
 cargo test --workspace
 
-# 单元测试（历史 + ANSI 解析器）
+# 单元测试（历史 + VT 终端 + 键编码）
 cargo test --workspace --lib --bins
 
 # 端到端（启动一个内置的 russh echo 服务，再用我们的客户端打通它）
 cargo test -p tiny-ssh-core --test echo_server
+
+# CLI 集成测试（VT 渲染 + OSC + ghost-text 门控）
+cargo test -p tiny-ssh-cli --test vt_integration
 ```
 
 ## 数据存放位置
@@ -116,22 +123,20 @@ cargo test -p tiny-ssh-core --test echo_server
 
 删除文件即可清空历史。
 
-## 已知限制（v0.1）
+## 已知限制
 
-- 输出是**行模式**：会剥离 ANSI 转义，颜色和光标控制不会还原。`vim` / `htop` 这类全屏程序在 v0.1 跑起来会很难看，等 v0.2 接 `alacritty_terminal`。
-- Host key 校验目前是 `AcceptAny`（**不安全**，仅供开发）。`known_hosts` 校验跟随凭据保险柜在后续版本一起做。
-- 远端 PTY 默认开 echo，所以输入框里的内容和滚动区里的远端回显会"重复显示"一次。等支持完整 VT 后会消除。
 - 不持久化连接配置。每次都要在命令行写 `user@host`。
-- 暂未做 cwd 跟踪，所以补全只按 `host + prefix` 排序，不会按目录细分。
+- `known_hosts` 自动学习（TOFU）策略已可用，但尚不支持手动编辑或拒绝策略配置。
+- 移动端 / 桌面 GUI 尚未开始。
 
 ## 路线图
 
 详见 [`docs/DESIGN.md`](docs/DESIGN.md)。下一步优先级：
 
-1. 接 `alacritty_terminal`，让 ANSI / 全屏程序正确渲染
-2. `known_hosts` 校验 + `keyring` 凭据保险柜
-3. DB 客户端（MySQL / PostgreSQL）+ schema 补全
-4. Tauri 2 桌面壳，复用同一个 Core
+1. `keyring` 凭据保险柜（密码/私钥免重复输入）
+2. DB 客户端（MySQL / PostgreSQL）+ schema 补全
+3. Tauri 2 桌面壳，复用同一个 Core
+4. WebAssembly 端口（浏览器内 SSH）
 
 ## 许可
 

@@ -1,8 +1,5 @@
 //! tiny-ssh CLI/TUI entry point.
 
-mod ansi;
-mod app;
-mod ui;
 
 use std::io;
 use std::path::PathBuf;
@@ -11,18 +8,22 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{Event, EventStream, KeyEvent, KeyEventKind},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyEvent, KeyEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::StreamExt;
+use tokio_stream::StreamExt;
 use ratatui::{prelude::CrosstermBackend, Terminal};
 use tiny_ssh_core::{
     spawn_session, AuthMethod, History, PtyConfig, SessionEvent, SessionHandle, SshConfig,
 };
 use tracing::{debug, error};
 
-use crate::app::{Action, App};
+use tiny_ssh_cli::app::{Action, App};
+use tiny_ssh_cli::{keys, ui};
 
 /// tiny-ssh: a tiny cross-platform SSH client with history-based autosuggest.
 #[derive(Parser, Debug)]
@@ -60,18 +61,26 @@ async fn main() -> Result<()> {
     let history =
         History::open_default().context("failed to open history database")?;
 
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (full_cols, full_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (vt_cols, vt_rows) = vt_dims(full_cols, full_rows);
     let pty = PtyConfig {
         term: "xterm-256color".to_string(),
-        cols,
-        rows,
+        cols: vt_cols,
+        rows: vt_rows,
     };
 
     let config = SshConfig::new(host.clone(), user.clone(), auth).with_port(port);
     let handle = spawn_session(config, pty);
     debug!("session spawned");
 
-    run_tui(handle, history, host, user).await
+    run_tui(handle, history, host, user, vt_cols, vt_rows).await
+}
+
+/// VT grid + remote PTY dimensions, derived from the full crossterm window
+/// size. The `ui::render` layout reserves a single status row at the bottom
+/// and gives everything else to the grid.
+fn vt_dims(total_cols: u16, total_rows: u16) -> (u16, u16) {
+    (total_cols.max(1), total_rows.saturating_sub(1).max(1))
 }
 
 fn init_tracing() {
@@ -120,17 +129,14 @@ fn build_auth(user: &str, host: &str, cli: &Cli) -> Result<AuthMethod> {
             Some(var) => std::env::var(var).ok().filter(|s| !s.is_empty()),
             None => None,
         };
-        return Ok(AuthMethod::PublicKey {
-            path: path.clone(),
-            passphrase,
-        });
+        return Ok(AuthMethod::public_key(path.clone(), passphrase));
     }
     let pw = match &cli.password_env {
         Some(var) => std::env::var(var).with_context(|| format!("env var `{var}` is not set"))?,
         None => rpassword::prompt_password(format!("password for {user}@{host}: "))
             .context("failed to read password")?,
     };
-    Ok(AuthMethod::Password(pw))
+    Ok(AuthMethod::password(pw))
 }
 
 async fn run_tui(
@@ -138,9 +144,20 @@ async fn run_tui(
     history: History,
     host: String,
     user: String,
+    vt_cols: u16,
+    vt_rows: u16,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
-    let result = drive(&mut terminal, &mut handle, &history, host, user).await;
+    let result = drive(
+        &mut terminal,
+        &mut handle,
+        &history,
+        host,
+        user,
+        vt_cols,
+        vt_rows,
+    )
+    .await;
     teardown_terminal(&mut terminal)?;
     result
 }
@@ -148,7 +165,13 @@ async fn run_tui(
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alt screen")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+    )
+    .context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).context("init terminal")?;
     Ok(terminal)
@@ -156,7 +179,13 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+    )
+    .ok();
     terminal.show_cursor().ok();
     Ok(())
 }
@@ -167,8 +196,10 @@ async fn drive(
     history: &History,
     host: String,
     user: String,
+    vt_cols: u16,
+    vt_rows: u16,
 ) -> Result<()> {
-    let mut app = App::new(host, user);
+    let mut app = App::new(host, user, vt_cols, vt_rows);
     let mut events = EventStream::new();
     let mut redraw = true;
 
@@ -244,8 +275,33 @@ async fn handle_terminal_event(
                 Action::None => Ok(false),
             }
         }
+        Event::Mouse(mouse) => {
+            let bytes = keys::encode_mouse(&mouse, app.terminal.mode());
+            if !bytes.is_empty() {
+                if let Err(e) = handle.send_bytes(bytes).await {
+                    app.last_error = Some(e.to_string());
+                }
+            }
+            Ok(false)
+        }
+        Event::Paste(text) => {
+            let bytes = if app.terminal.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE) {
+                let mut out = b"\x1b[200~".to_vec();
+                out.extend_from_slice(text.as_bytes());
+                out.extend_from_slice(b"\x1b[201~");
+                out
+            } else {
+                text.into_bytes()
+            };
+            if let Err(e) = handle.send_bytes(bytes).await {
+                app.last_error = Some(e.to_string());
+            }
+            Ok(false)
+        }
         Event::Resize(cols, rows) => {
-            let _ = handle.resize(cols, rows).await;
+            let (vt_cols, vt_rows) = vt_dims(cols, rows);
+            let _ = handle.resize(vt_cols, vt_rows).await;
+            app.on_resize(vt_cols, vt_rows);
             Ok(false)
         }
         _ => Ok(false),
@@ -258,4 +314,85 @@ fn finalize_after_close(
 ) -> Result<()> {
     terminal.draw(|f| ui::render(f, app))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_target, vt_dims};
+
+    #[test]
+    fn vt_dims_subtracts_status_row() {
+        assert_eq!(vt_dims(80, 24), (80, 23));
+    }
+
+    #[test]
+    fn vt_dims_clamps_to_one() {
+        assert_eq!(vt_dims(1, 1), (1, 1));
+        assert_eq!(vt_dims(0, 0), (1, 1));
+    }
+
+    #[test]
+    fn parses_user_at_host() {
+        let (u, h, p) = parse_target("alice@example.com").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(h, "example.com");
+        assert_eq!(p, None);
+    }
+
+    #[test]
+    fn parses_user_at_host_port() {
+        let (u, h, p) = parse_target("alice@example.com:2222").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(h, "example.com");
+        assert_eq!(p, Some(2222));
+    }
+
+    #[test]
+    fn parses_ipv4_with_port() {
+        let (u, h, p) = parse_target("bob@127.0.0.1:22").unwrap();
+        assert_eq!(u, "bob");
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, Some(22));
+    }
+
+    #[test]
+    fn parses_bracketed_ipv6_with_port() {
+        let (u, h, p) = parse_target("alice@[::1]:22").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(h, "::1");
+        assert_eq!(p, Some(22));
+    }
+
+    #[test]
+    fn parses_bracketed_ipv6_without_port() {
+        let (u, h, p) = parse_target("alice@[2001:db8::1]").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(h, "2001:db8::1");
+        assert_eq!(p, None);
+    }
+
+    #[test]
+    fn rejects_no_at_sign() {
+        assert!(parse_target("nohost").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_user() {
+        assert!(parse_target("@host").is_err());
+    }
+
+    #[test]
+    fn rejects_non_numeric_port() {
+        assert!(parse_target("user@host:abc").is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_port() {
+        assert!(parse_target("user@host:99999").is_err());
+    }
+
+    #[test]
+    fn rejects_unbalanced_ipv6_bracket() {
+        assert!(parse_target("user@[::1:22").is_err());
+    }
 }

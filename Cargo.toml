@@ -16,7 +16,6 @@ tiny-ssh-core = { path = "crates/tiny-ssh-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"
-futures = "0.3"
 
 # ssh
 russh = "0.45"
@@ -25,9 +24,15 @@ russh-keys = "0.45"
 # storage / data
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# secrets
+zeroize = "1"
+
 # tui
 ratatui = "0.28"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
+
+# terminal emulation
+alacritty_terminal = "0.26"
 
 # infra
 anyhow = "1"
@@ -36,8 +41,6 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "5"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 [profile.release]
 lto = "thin"

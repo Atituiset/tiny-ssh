@@ -21,4 +21,5 @@ pub use session::{
 pub use suggest::{EngineSuggestion, Provenance, SuggestEngine};
 pub use transport::ssh::{
     AuthMethod, HostKeyPolicy, PtyConfig, SshClient, SshConfig, SshError, SshEvent, SshSession,
+    TofuPolicy,
 };

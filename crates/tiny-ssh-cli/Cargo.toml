@@ -13,11 +13,12 @@ path = "src/main.rs"
 [dependencies]
 tiny-ssh-core = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-futures = { workspace = true }
 rpassword = "7"

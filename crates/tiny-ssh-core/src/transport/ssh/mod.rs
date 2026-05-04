@@ -13,6 +13,6 @@ mod error;
 mod session;
 
 pub use client::SshClient;
-pub use config::{AuthMethod, HostKeyPolicy, PtyConfig, SshConfig};
+pub use config::{AuthMethod, HostKeyPolicy, PtyConfig, SshConfig, TofuPolicy};
 pub use error::SshError;
 pub use session::{SshEvent, SshSession};

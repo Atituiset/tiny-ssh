@@ -91,6 +91,37 @@ impl Terminal {
         self.inner.scroll_display(Scroll::Delta(lines));
     }
 
+    /// Extract the visible screen content as plain text lines.
+    /// Strips trailing whitespace from each line.
+    pub fn screen_text(&self) -> Vec<String> {
+        use alacritty_terminal::term::cell::Flags;
+        let content = self.renderable_content();
+        let mut lines: Vec<String> = Vec::new();
+        let mut current_line: i32 = i32::MIN;
+        let mut current_text = String::new();
+        for indexed in content.display_iter {
+            let line_idx = indexed.point.line.0;
+            if line_idx != current_line {
+                if current_line != i32::MIN {
+                    lines.push(current_text.trim_end().to_string());
+                }
+                current_line = line_idx;
+                current_text.clear();
+            }
+            if !indexed
+                .cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                current_text.push(indexed.cell.c);
+            }
+        }
+        if current_line != i32::MIN {
+            lines.push(current_text.trim_end().to_string());
+        }
+        lines
+    }
+
     #[cfg(test)]
     fn cell_char(&self, col: u16, line: u16) -> char {
         use alacritty_terminal::index::{Column, Line, Point};

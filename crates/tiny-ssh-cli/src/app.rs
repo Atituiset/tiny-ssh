@@ -37,6 +37,8 @@ pub enum Action {
     Quit,
     /// Toggle local mouse capture (Ctrl+Shift+M).
     ToggleMouseCapture,
+    /// Copy visible screen text to system clipboard via OSC 52 (Ctrl+Shift+C).
+    CopyToClipboard,
     /// No-op (UI-only state change, or a key we don't translate).
     None,
 }
@@ -80,6 +82,9 @@ pub struct App {
     /// Set to `true` when `mouse_capture` changes so the driver can sync
     /// the crossterm state (EnableMouseCapture / DisableMouseCapture).
     pub mouse_capture_changed: bool,
+    /// Pending clipboard text to send via OSC 52. Set by CopyToClipboard action,
+    /// consumed by the driver loop.
+    pub pending_clipboard: Option<String>,
 }
 
 impl App {
@@ -100,6 +105,7 @@ impl App {
             last_input_was_enter: false,
             mouse_capture: true,
             mouse_capture_changed: false,
+            pending_clipboard: None,
         }
     }
 
@@ -235,6 +241,13 @@ impl App {
             self.mouse_capture = !self.mouse_capture;
             self.mouse_capture_changed = true;
             return Action::ToggleMouseCapture;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            let lines = self.terminal.screen_text();
+            self.pending_clipboard = Some(lines.join("\n"));
+            return Action::CopyToClipboard;
         }
 
         // Right at end-of-shadow with an active suggestion: accept the ghost.

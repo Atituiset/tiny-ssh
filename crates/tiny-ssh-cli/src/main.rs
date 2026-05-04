@@ -1,7 +1,7 @@
 //! tiny-ssh CLI/TUI entry point.
 
 
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -214,6 +214,15 @@ async fn drive(
             redraw = true;
         }
 
+        if let Some(text) = app.pending_clipboard.take() {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            let b64 = STANDARD.encode(text);
+            let osc52 = format!("\x1b]52;c;{}\x07", b64);
+            let mut stdout = io::stdout();
+            stdout.write_all(osc52.as_bytes())?;
+            stdout.flush()?;
+        }
+
         if redraw {
             terminal.draw(|f| ui::render(f, &app))?;
             redraw = false;
@@ -283,6 +292,7 @@ async fn handle_terminal_event(
                     Ok(true)
                 }
                 Action::ToggleMouseCapture => Ok(false),
+                Action::CopyToClipboard => Ok(false),
                 Action::None => Ok(false),
             }
         }
